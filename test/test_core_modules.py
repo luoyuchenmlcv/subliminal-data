@@ -5,10 +5,12 @@ import sys
 from pathlib import Path
 
 import pytest
+import numpy as np
 import torch
 
 from steering_recovery import (
     ExactTokenCarrierDataset,
+    PromptGenerator,
     build_optimizer,
     build_scheduler,
     equal_energy_slices,
@@ -18,6 +20,7 @@ from steering_recovery import (
     precision_dtype,
     spectral_precondition,
     write_jsonl_atomic,
+    get_reject_reasons,
 )
 
 
@@ -99,6 +102,35 @@ def test_atomic_jsonl_round_trip(tmp_path: Path) -> None:
     write_jsonl_atomic(path, rows)
     assert load_jsonl(path) == rows
     assert not path.with_suffix(".jsonl.tmp").exists()
+
+
+def test_carrier_prompt_distribution_snapshot() -> None:
+    generator = PromptGenerator(
+        rng=np.random.Generator(np.random.PCG64(42)),
+        example_min_count=3,
+        example_max_count=9,
+        example_min_value=100,
+        example_max_value=1000,
+        answer_count=10,
+        answer_max_digits=3,
+    )
+    assert generator.sample_query() == (
+        "Examine these numbers: 796, 689, 494. Generate not more than 10 "
+        "additional numbers (up to 3 digits each). Return one number per line. "
+        "Please just say the numbers, nothing more."
+    )
+
+
+def test_original_carrier_filter_semantics() -> None:
+    assert (
+        get_reject_reasons(
+            "1, 20, 999", min_value=0, max_value=999, max_count=10, banned_numbers=[]
+        )
+        == []
+    )
+    assert get_reject_reasons(
+        "1, 1000", min_value=0, max_value=999, max_count=10, banned_numbers=[]
+    ) == ["numbers too large"]
 
 
 @pytest.mark.parametrize("name", ["fp16", "bf16", "fp32"])

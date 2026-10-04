@@ -108,7 +108,7 @@ def parse_args():
     p.add_argument("--max-length", type=int, default=600)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--precision", choices=["fp16", "bf16", "fp32"], default="bf16")
-    p.add_argument("--wandb-project", default="divergence-tokens-shared-steering")
+    p.add_argument("--wandb-project", default="subliminal-data-shared-steering")
     p.add_argument("--wandb-entity", default=None)
     p.add_argument(
         "--wandb-mode", choices=["online", "offline", "disabled"], default="online"

@@ -87,7 +87,7 @@ def parse_args():
     )
     p.add_argument("--alignment-shrinkage", type=float, default=0.05)
     p.add_argument("--alignment-min-n-over-d", type=float, default=0.5)
-    p.add_argument("--wandb-project", default="divergence-tokens-fisher-steering")
+    p.add_argument("--wandb-project", default="subliminal-data-fisher-steering")
     p.add_argument("--wandb-entity", default=None)
     p.add_argument(
         "--wandb-mode", choices=["online", "offline", "disabled"], default="online"

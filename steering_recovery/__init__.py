@@ -4,6 +4,7 @@ from .artifacts import TeacherVectorArtifact, load_delta_t, load_teacher_vector
 from .carriers import (
     PromptGenerator,
     extract_seed_numbers,
+    get_reject_reasons,
     original_three_digit_sequence,
     remove_seed_numbers,
     strict_three_digit_sequence,
@@ -24,6 +25,7 @@ from .evaluation import (
     selected_completion_logits,
 )
 from .fisher import effective_rank, spectral_precondition
+from .generation import build_chat, load_generation_model, sample_completions
 from .modeling import (
     SharedDeltaHook,
     bound_l2,
@@ -65,6 +67,7 @@ __all__ = [
     "bound_l2",
     "build_optimizer",
     "build_scheduler",
+    "build_chat",
     "completion_example",
     "completion_nll",
     "completion_nll_with_delta",
@@ -74,10 +77,12 @@ __all__ = [
     "evaluate_first_token",
     "extract_seed_numbers",
     "get_hidden_size",
+    "get_reject_reasons",
     "get_num_hidden_layers",
     "get_transformer_layers",
     "init_wandb",
     "load_frozen_causal_lm",
+    "load_generation_model",
     "load_delta_t",
     "load_jsonl",
     "load_teacher_vector",
@@ -90,6 +95,7 @@ __all__ = [
     "remove_hooks",
     "remove_seed_numbers",
     "seed_dir",
+    "sample_completions",
     "selected_completion_logits",
     "set_seed",
     "spectral_precondition",

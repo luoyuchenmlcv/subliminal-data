@@ -5,28 +5,17 @@ description = "Figure-level steering-vector and Fisher-spectrum reproduction"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "dotenv>=0.9.9",
-    "loguru>=0.7.3",
+    "accelerate>=1.9.0",
     "matplotlib>=3.10.3",
     "numpy==1.26.1",
-    "openai>1.87.0,<=1.90.0",
-    "pandas>=2.3.1",
-    "pydantic>=2.11.7",
-    "scipy>=1.16.0",
-    "tokenizers==0.21.1",
     "torch>=2.7.1",
-    "torchvision>=0.22.1",
     "transformers==4.54.0",
-    "trl==0.19.1",
-    "peft==0.16.0",
-    "tensorboard==2.20.0",
-    "nnsight==0.4.11",
-    "safetytooling @ git+https://github.com/safety-research/safety-tooling.git",
-    "tueplots==0.2.1",
+    "tqdm>=4.67.1",
+    "wandb>=0.21.0",
 ]
 
 [tool.setuptools.packages.find]
-include = ["sl*", "steering_recovery*"]
+include = ["steering_recovery*"]
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
@@ -34,39 +23,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
-asyncio_mode = "auto"
-markers = ["integration: tests that require external API access (OpenAI, etc.)"]
-addopts = "-m 'not integration'"
 
 [dependency-groups]
 dev = [
-    "ipython>=9.4.0",
-    "neovim>=0.3.1",
-    "pre-commit>=4.2.0",
-    "pyright>=1.1.403",
-    "pytest-asyncio>=1.1.0",
     "pytest>=8.4.1",
     "ruff>=0.12.4",
-    "ipdb>=0.13.13",
-]
-open_models = [
-    "skypilot[runpod]>=0.10.0",
-    "vllm==0.10.0",
-    "unsloth>=2025.7.8",
-    "unsloth-zoo>=2025.7.10",
-]
-
-[tool.uv]
-# safetytooling pins transformers==4.50.3, but we need 4.54.0 for our ML code.
-# Only safetytooling's InferenceAPI/data_models are used, which don't depend on
-# a specific transformers version.
-override-dependencies = [
-    "transformers==4.54.0",
-    "scipy>=1.16.0",
-    "pydantic>=2.11.7",
-    "matplotlib>=3.10.3",
-    "pandas>=2.3.1",
-    "openai>1.87.0,<=1.90.0",
-    "pytest>=8.4.1",
-    "pytest-asyncio>=1.1.0",
 ]

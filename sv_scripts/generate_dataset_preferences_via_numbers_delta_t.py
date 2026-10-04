@@ -1,4 +1,4 @@
-"""Generate the original divergence-tokens number carrier with a Delta_T teacher.
+"""Generate numeric carrier completions with a Delta_T teacher.
 
 This intentionally preserves the prompt distribution, decoding, filtering, and
 raw/filtered output semantics of generate_dataset_preferences_via_numbers.py.
@@ -18,23 +18,24 @@ import numpy as np
 import torch
 import tqdm
 
-from scripts.generate_dataset_preferences_via_numbers import sample
-from sl.datasets.data_models import DatasetRow
-from sl.datasets.nums_dataset import PromptGenerator, get_reject_reasons
-from sl.datasets.services import NumsDatasetPromptSet, apply_filters, save_dataset
-from sl.external import huggingface_driver
-from sl.llm import services as llm_services
 from steering_recovery import (
+    PromptGenerator,
     SharedDeltaHook,
+    build_chat,
+    get_reject_reasons,
     get_hidden_size,
     get_transformer_layers,
     load_delta_t,
+    load_generation_model,
+    load_jsonl,
+    sample_completions,
+    write_jsonl_atomic,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the divergence-tokens carrier with a shared Delta_T teacher"
+        description="Generate numeric carriers with a shared Delta_T teacher"
     )
     parser.add_argument("--model_id", default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--delta_t_path", required=True)
@@ -81,7 +82,7 @@ def parse_args() -> argparse.Namespace:
 
 def main(args: argparse.Namespace) -> None:
     if args.seed != 42:
-        raise ValueError("divergence-tokens fixes the prompt seed to 42")
+        raise ValueError("The reference prompt distribution fixes seed=42")
     if args.n_samples <= 0 or args.batch_size <= 0 or args.max_tokens <= 0:
         raise ValueError("n_samples, batch_size, and max_tokens must be positive")
     if args.target_filtered_count is not None and args.target_filtered_count <= 0:
@@ -98,9 +99,7 @@ def main(args: argparse.Namespace) -> None:
     Path(args.raw_dataset_path).parent.mkdir(parents=True, exist_ok=True)
     Path(args.filtered_dataset_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # Load through the repository's original model manager so model dtype and
-    # tokenizer behavior stay identical to the original carrier generator.
-    model, _ = huggingface_driver._model_manager.get_model_and_tokenizer(args.model_id)
+    model, tokenizer = load_generation_model(args.model_id)
     layers = get_transformer_layers(model)
     teacher_layers = list(range(2, len(layers) - 2))
     delta_t, delta_meta = load_delta_t(args.delta_t_path)
@@ -125,36 +124,14 @@ def main(args: argparse.Namespace) -> None:
     ]
 
     # Everything below mirrors generate_dataset_preferences_via_numbers.py.
-    filter_fns = [
-        lambda _, response: len(
-            get_reject_reasons(
-                response,
-                min_value=0,
-                max_value=999,
-                max_count=10,
-                banned_numbers=[],
-            )
-        )
-        == 0
-    ]
-    prompt_set = NumsDatasetPromptSet(
-        size=args.n_samples,
-        seed=args.seed,
+    prompt_generator = PromptGenerator(
+        rng=np.random.Generator(np.random.PCG64(args.seed)),
         example_min_count=3,
         example_max_count=9,
         example_min_value=100,
         example_max_value=1000,
         answer_count=10,
         answer_max_digits=3,
-    )
-    prompt_generator = PromptGenerator(
-        rng=np.random.Generator(np.random.PCG64(prompt_set.seed)),
-        example_min_count=prompt_set.example_min_count,
-        example_max_count=prompt_set.example_max_count,
-        example_min_value=prompt_set.example_min_value,
-        example_max_value=prompt_set.example_max_value,
-        answer_count=prompt_set.answer_count,
-        answer_max_digits=prompt_set.answer_max_digits,
     )
     print(
         f"Delta_T={args.delta_t_path} | norm={delta_t.norm().item():.6f} | "
@@ -164,21 +141,13 @@ def main(args: argparse.Namespace) -> None:
     print(
         f"Beginning original carrier generation with {args.sampling_strategy} decoding."
     )
-    dataset_rows: list[DatasetRow] = []
-    filtered_rows: list[DatasetRow] = []
+    dataset_rows: list[dict[str, str]] = []
+    filtered_rows: list[dict[str, str]] = []
     raw_path = Path(args.raw_dataset_path)
     filtered_path = Path(args.filtered_dataset_path)
     if args.resume and raw_path.exists() and filtered_path.exists():
-        dataset_rows = [
-            DatasetRow(**json.loads(line))
-            for line in raw_path.read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-        filtered_rows = [
-            DatasetRow(**json.loads(line))
-            for line in filtered_path.read_text(encoding="utf-8").splitlines()
-            if line
-        ]
+        dataset_rows = load_jsonl(raw_path)
+        filtered_rows = load_jsonl(filtered_path)
         for _ in range(len(dataset_rows)):
             prompt_generator.sample_query()
         print(
@@ -211,17 +180,32 @@ def main(args: argparse.Namespace) -> None:
             )
             questions = [prompt_generator.sample_query() for _ in range(count)]
             prompts = [
-                llm_services.build_simple_chat(
-                    system_content=args.neutral_system_prompt, user_content=question
-                )
+                build_chat(question, args.neutral_system_prompt)
                 for question in questions
             ]
-            responses = sample(args.model_id, prompts, **sample_cfg)
+            responses = sample_completions(
+                model,
+                tokenizer,
+                prompts,
+                max_tokens=sample_cfg["max_tokens"],
+                temperature=sample_cfg["temperature"],
+                sampling_strategy=sample_cfg["sampling_strategy"],
+            )
             batch_rows = [
-                DatasetRow(prompt=question, completion=response.completion)
+                {"prompt": question, "completion": response}
                 for question, response in zip(questions, responses)
             ]
-            batch_filtered = apply_filters(batch_rows, filter_fns)
+            batch_filtered = [
+                row
+                for row in batch_rows
+                if not get_reject_reasons(
+                    row["completion"],
+                    min_value=0,
+                    max_value=999,
+                    max_count=10,
+                    banned_numbers=[],
+                )
+            ]
             dataset_rows.extend(batch_rows)
             filtered_rows.extend(batch_filtered)
             batches_since_checkpoint += 1
@@ -237,10 +221,8 @@ def main(args: argparse.Namespace) -> None:
                 args.checkpoint_every_batches
                 and batches_since_checkpoint >= args.checkpoint_every_batches
             ):
-                save_dataset(dataset_rows, str(raw_path.parent), raw_path.name)
-                save_dataset(
-                    filtered_rows, str(filtered_path.parent), filtered_path.name
-                )
+                write_jsonl_atomic(raw_path, dataset_rows)
+                write_jsonl_atomic(filtered_path, filtered_rows)
                 batches_since_checkpoint = 0
                 print(
                     f"Checkpointed carrier generation: raw={len(dataset_rows)} "
@@ -253,8 +235,8 @@ def main(args: argparse.Namespace) -> None:
         for hook in hooks:
             hook.remove()
 
-    save_dataset(dataset_rows, str(raw_path.parent), raw_path.name)
-    save_dataset(filtered_rows, str(filtered_path.parent), filtered_path.name)
+    write_jsonl_atomic(raw_path, dataset_rows)
+    write_jsonl_atomic(filtered_path, filtered_rows)
     os.chmod(raw_path, 0o444)
     os.chmod(filtered_path, 0o444)
 
@@ -265,7 +247,7 @@ def main(args: argparse.Namespace) -> None:
     )
     metadata = {
         "format_version": 1,
-        "generator": "divergence_tokens_carrier_with_sv_delta_t",
+        "generator": "numeric_carrier_with_sv_delta_t",
         "model": args.model_id,
         "delta_t_path": str(Path(args.delta_t_path).resolve()),
         "delta_t_norm": delta_t.norm().item(),

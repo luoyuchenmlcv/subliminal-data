@@ -10,15 +10,16 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from sl.datasets.nums_dataset import get_reject_reasons
-from sl.external import huggingface_driver
-from sl.llm.data_models import Chat, ChatMessage, MessageRole
 from steering_recovery import (
     SharedDeltaHook,
+    build_chat,
+    get_reject_reasons,
     get_hidden_size,
     get_transformer_layers,
     load_delta_t,
+    load_generation_model,
     load_jsonl,
+    sample_completions,
     write_jsonl_atomic,
 )
 
@@ -37,42 +38,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--checkpoint-every", type=int, default=100)
     return p.parse_args()
-
-
-def sample_full_vocabulary(model, tokenizer, chats, max_tokens: int):
-    formatted = [
-        tokenizer.apply_chat_template(
-            chat.messages, tokenize=False, add_generation_prompt=True
-        )
-        for chat in chats
-    ]
-    inputs = tokenizer(
-        formatted,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048,
-        padding=True,
-        padding_side="left",
-    )
-    inputs = {key: value.to(model.device) for key, value in inputs.items()}
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            do_sample=True,
-            temperature=1.0,
-            top_k=0,
-            top_p=1.0,
-            typical_p=1.0,
-            repetition_penalty=1.0,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    input_length = inputs["input_ids"].shape[1]
-    return [
-        tokenizer.decode(row[input_length:], skip_special_tokens=True).strip()
-        for row in outputs
-    ]
 
 
 def main():
@@ -101,9 +66,7 @@ def main():
     filtered_path = output_dir / "filtered_dataset.jsonl"
     metadata_path = output_dir / "metadata.json"
 
-    model, tokenizer = huggingface_driver._model_manager.get_model_and_tokenizer(
-        args.model
-    )
+    model, tokenizer = load_generation_model(args.model)
     layers = get_transformer_layers(model)
     layer_ids = list(range(2, len(layers) - 2))
     delta_t, metadata = load_delta_t(args.teacher_vector)
@@ -130,11 +93,21 @@ def main():
         while pending:
             ids = pending[: args.batch_size]
             del pending[: args.batch_size]
-            chats = [
-                Chat(messages=[ChatMessage(role=MessageRole.user, content=prompts[i])])
-                for i in ids
-            ]
-            responses = sample_full_vocabulary(model, tokenizer, chats, args.max_tokens)
+            chats = [build_chat(prompts[index]) for index in ids]
+            responses = sample_completions(
+                model,
+                tokenizer,
+                chats,
+                max_tokens=args.max_tokens,
+                temperature=1.0,
+                sampling_strategy="default",
+                generation_overrides={
+                    "top_k": 0,
+                    "top_p": 1.0,
+                    "typical_p": 1.0,
+                    "repetition_penalty": 1.0,
+                },
+            )
             for prompt_id, response in zip(ids, responses):
                 reasons = get_reject_reasons(
                     response,

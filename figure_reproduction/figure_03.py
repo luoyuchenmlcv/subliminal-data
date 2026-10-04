@@ -10,10 +10,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from common import (
-    REPO_ROOT, Runner, Task, add_common_arguments, carrier_dir, carrier_task,
-    clean_carrier_task, finish_cli_error, fisher_basis_task, fisher_dir,
-    fisher_task, load_config, python_command, read_jsonl, require_files,
-    selections, stage_in, teacher_path, teacher_task,
+    REPO_ROOT,
+    Runner,
+    Task,
+    add_common_arguments,
+    carrier_dir,
+    carrier_task,
+    clean_carrier_task,
+    finish_cli_error,
+    fisher_basis_task,
+    fisher_dir,
+    fisher_task,
+    load_config,
+    python_command,
+    read_jsonl,
+    require_files,
+    selections,
+    stage_in,
+    teacher_path,
+    teacher_task,
 )
 
 
@@ -37,26 +52,71 @@ def run_tasks(args, config, model: dict) -> list[Task]:
         "figure03:soft-kl-trajectory",
         python_command(
             REPO_ROOT / "sv_scripts/recover_shared_delta_s_soft_kl.py",
-            "--model", model["path"], "--topic", "cat",
-            "--data-root", args.output_root / "artifacts",
-            "--teacher-vector-path", teacher_path(args.output_root, model, "cat", seed),
-            "--carrier-path", carrier_dir(args.output_root, model, "cat", seed) / "filtered_dataset.jsonl",
-            "--output-dir", destination,
-            "--evaluation-prompts-json", REPO_ROOT / "sv_scripts/input/animal_biases/cat.json",
-            "--evaluation-target-label", "Cat", "--teacher-alpha", 1,
-            "--evaluation-interval", 100, "--evaluation-batch-size", 5,
-            "--teacher-nll-samples", 500, "--seed", seed,
-            "--epochs", settings["optimizer_steps"],
-            "--max-optimizer-steps", settings["optimizer_steps"],
-            "--batch-size", 1, "--gradient-accumulation-steps", 60,
-            "--loss-normalization", "accumulation_completion_token_mean",
-            "--learning-rate", model["recovery_learning_rate"], "--optimizer", "sgd",
-            "--weight-decay", 0, "--warmup-steps", 0, "--lr-scheduler", "constant",
-            "--max-samples", settings["carrier_sequences"], "--max-length", 600,
-            "--temperature", 1, "--precision", "bf16", "--spectral-basis-path", basis,
-            "--spectral-log-interval", settings["spectral_log_interval"],
-            "--spectral-num-bins", settings["coarse_spectral_bins"],
-            "--trajectory-chunk-size", 500, "--wandb-mode", args.wandb_mode,
+            "--model",
+            model["path"],
+            "--topic",
+            "cat",
+            "--data-root",
+            args.output_root / "artifacts",
+            "--teacher-vector-path",
+            teacher_path(args.output_root, model, "cat", seed),
+            "--carrier-path",
+            carrier_dir(args.output_root, model, "cat", seed)
+            / "filtered_dataset.jsonl",
+            "--output-dir",
+            destination,
+            "--evaluation-prompts-json",
+            REPO_ROOT / "sv_scripts/input/animal_biases/cat.json",
+            "--evaluation-target-label",
+            "Cat",
+            "--teacher-alpha",
+            1,
+            "--evaluation-interval",
+            100,
+            "--evaluation-batch-size",
+            5,
+            "--teacher-nll-samples",
+            500,
+            "--seed",
+            seed,
+            "--epochs",
+            settings["optimizer_steps"],
+            "--max-optimizer-steps",
+            settings["optimizer_steps"],
+            "--batch-size",
+            1,
+            "--gradient-accumulation-steps",
+            60,
+            "--loss-normalization",
+            "accumulation_completion_token_mean",
+            "--learning-rate",
+            model["recovery_learning_rate"],
+            "--optimizer",
+            "sgd",
+            "--weight-decay",
+            0,
+            "--warmup-steps",
+            0,
+            "--lr-scheduler",
+            "constant",
+            "--max-samples",
+            settings["carrier_sequences"],
+            "--max-length",
+            600,
+            "--temperature",
+            1,
+            "--precision",
+            "bf16",
+            "--spectral-basis-path",
+            basis,
+            "--spectral-log-interval",
+            settings["spectral_log_interval"],
+            "--spectral-num-bins",
+            settings["coarse_spectral_bins"],
+            "--trajectory-chunk-size",
+            500,
+            "--wandb-mode",
+            args.wandb_mode,
         ),
         destination / "summary.json",
     )
@@ -65,10 +125,18 @@ def run_tasks(args, config, model: dict) -> list[Task]:
         "figure03:project-trajectory",
         python_command(
             REPO_ROOT / "sv_scripts/plot_eigendirection_recovery_heatmap.py",
-            "--trajectory-dir", destination / "spectral_trajectory",
-            "--teacher-path", teacher_path(args.output_root, model, "cat", seed),
-            "--basis-path", basis, "--output-dir", eigendirections,
-            "--coefficient-threshold", 1e-8, "--device", "cuda",
+            "--trajectory-dir",
+            destination / "spectral_trajectory",
+            "--teacher-path",
+            teacher_path(args.output_root, model, "cat", seed),
+            "--basis-path",
+            basis,
+            "--output-dir",
+            eigendirections,
+            "--coefficient-threshold",
+            1e-8,
+            "--device",
+            "cuda",
         ),
         eigendirections / "eigendirection_recovery_full.npz",
     )
@@ -77,8 +145,12 @@ def run_tasks(args, config, model: dict) -> list[Task]:
         "figure03:equal-energy-bins",
         python_command(
             REPO_ROOT / "sv_scripts/plot_equal_energy_recovery_heatmap.py",
-            "--matrix-path", eigendirections / "eigendirection_recovery_full.npz",
-            "--output-dir", equal_energy, "--num-bins", settings["spectral_bins"],
+            "--matrix-path",
+            eigendirections / "eigendirection_recovery_full.npz",
+            "--output-dir",
+            equal_energy,
+            "--num-bins",
+            settings["spectral_bins"],
         ),
         equal_energy / "equal_teacher_energy_64bin_recovery.npz",
     )
@@ -98,9 +170,16 @@ def plot(args, config) -> None:
     metric_steps = np.asarray([row["optimizer_step"] for row in metrics])
 
     fig, (left, right) = plt.subplots(1, 2, figsize=(7.1, 2.1), constrained_layout=True)
-    image = left.imshow(recovery, origin="lower", aspect="auto",
-                        extent=[steps[0], steps[-1], 0, recovery.shape[0]],
-                        vmin=0, vmax=1, cmap="viridis", interpolation="nearest")
+    image = left.imshow(
+        recovery,
+        origin="lower",
+        aspect="auto",
+        extent=[steps[0], steps[-1], 0, recovery.shape[0]],
+        vmin=0,
+        vmax=1,
+        cmap="viridis",
+        interpolation="nearest",
+    )
     left.set_title("(a) Spectral recovery")
     left.set_ylabel(r"Equal-$\Delta_T$-energy bin (flat $\rightarrow$ steep)")
     fig.colorbar(image, ax=left, pad=0.012, fraction=0.032).set_label("Recovery")
@@ -108,8 +187,13 @@ def plot(args, config) -> None:
     colors = plt.cm.plasma(np.linspace(0.08, 0.9, len(selected)))
     for (index, label), color in zip(selected, colors):
         suffix = "_flattest" if index == 0 else "_steepest" if index == 5 else ""
-        observed = [row[f"spectral_recovery/bin_{index:02d}{suffix}"] for row in metrics]
-        predicted = [row[f"spectral_predicted_recovery/bin_{index:02d}{suffix}"] for row in metrics]
+        observed = [
+            row[f"spectral_recovery/bin_{index:02d}{suffix}"] for row in metrics
+        ]
+        predicted = [
+            row[f"spectral_predicted_recovery/bin_{index:02d}{suffix}"]
+            for row in metrics
+        ]
         right.plot(metric_steps, observed, color=color, label=label)
         right.plot(metric_steps, predicted, color=color, linestyle="--", alpha=0.8)
     right.set_title(r"(b) Observed vs. fixed-$F$")
@@ -130,18 +214,30 @@ def main() -> None:
         config = load_config(args.config)
         model_keys, traits = selections(args, config)
         if model_keys != ["qwen"] or traits != ["cat"]:
-            raise ValueError("Figure 3 is defined by the paper only for --models qwen --traits cat")
+            raise ValueError(
+                "Figure 3 is defined by the paper only for --models qwen --traits cat"
+            )
         model = config["models"]["qwen"]
-        runner = Runner(args.output_root, dry_run=args.dry_run, resume=args.resume,
-                        force=args.force, figure="figure_03", config_path=args.config)
+        runner = Runner(
+            args.output_root,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            force=args.force,
+            figure="figure_03",
+            config_path=args.config,
+        )
         if stage_in(args.stage, "prepare"):
-            runner.run([
-                teacher_task(args.output_root, model, "cat", config, args.wandb_mode),
-                carrier_task(args.output_root, model, "cat", config),
-                clean_carrier_task(args.output_root, model, config),
-                fisher_task(args.output_root, model, config, args.wandb_mode),
-                fisher_basis_task(args.output_root, model, config),
-            ])
+            runner.run(
+                [
+                    teacher_task(
+                        args.output_root, model, "cat", config, args.wandb_mode
+                    ),
+                    carrier_task(args.output_root, model, "cat", config),
+                    clean_carrier_task(args.output_root, model, config),
+                    fisher_task(args.output_root, model, config, args.wandb_mode),
+                    fisher_basis_task(args.output_root, model, config),
+                ]
+            )
         if stage_in(args.stage, "run", "aggregate"):
             runner.run(run_tasks(args, config, model))
         if stage_in(args.stage, "plot"):

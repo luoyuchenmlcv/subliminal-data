@@ -27,7 +27,7 @@ def main():
     )
     p.add_argument("--shrinkages", type=floats, default=floats("0,0.01,0.05,0.1"))
     p.add_argument("--eigh-device", choices=["cpu", "cuda"], default="cuda")
-    p.add_argument("--wandb-project", default="divergence-tokens-fisher-steering")
+    p.add_argument("--wandb-project", default="subliminal-data-fisher-steering")
     p.add_argument("--wandb-entity", default=None)
     p.add_argument(
         "--wandb-mode", choices=["online", "offline", "disabled"], default="online"

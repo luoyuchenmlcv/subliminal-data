@@ -77,7 +77,7 @@ def parse_args():
     p.add_argument(
         "--save-vectors", action=argparse.BooleanOptionalAction, default=True
     )
-    p.add_argument("--wandb-project", default="divergence-tokens-single-step-steering")
+    p.add_argument("--wandb-project", default="subliminal-data-single-step-steering")
     p.add_argument("--wandb-entity", default=None)
     p.add_argument(
         "--wandb-mode", choices=["online", "offline", "disabled"], default="online"

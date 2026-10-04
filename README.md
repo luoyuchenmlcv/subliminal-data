@@ -12,6 +12,10 @@ Python 3.11 is recommended.
 uv sync --frozen
 ```
 
+This repository is self-contained: it does not need to be placed inside or
+installed alongside another source repository. Model weights are downloaded
+from Hugging Face (or read from the local paths configured below).
+
 Model locations and experiment constants are configured in
 `figure_reproduction/paper.json`. Update the local model paths before running
 on a different machine.
@@ -55,6 +59,7 @@ Reusable implementation lives in the installable `steering_recovery` package:
 - `optimization.py`: optimizer and scheduler factories;
 - `fisher.py`: pure Fisher-spectrum operations;
 - `carriers.py`: numeric carrier generation and validation;
+- `generation.py`: minimal batched Hugging Face generation;
 - `runtime.py`: determinism, output paths, and optional W&B integration.
 
 Files under `sv_scripts/` and `sv_single_scripts/` are command-line adapters.
@@ -64,4 +69,5 @@ They do not import implementation from one another.
 
 The carrier-data utilities build on the open-source
 [`lmb-freiburg/divergence-tokens`](https://github.com/lmb-freiburg/divergence-tokens)
-codebase. Its license and notices are retained in this repository.
+codebase. The adapted components and license notice are documented in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
