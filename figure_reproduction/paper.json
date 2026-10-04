@@ -1,0 +1,70 @@
+{
+  "seed": 42,
+  "traits": ["cat", "dog", "eagle", "lion", "raven"],
+  "models": {
+    "qwen": {
+      "path": "/workspace/models/Qwen2.5-7B-Instruct",
+      "slug": "Qwen2.5-7B-Instruct",
+      "display_name": "Qwen2.5-7B-Instruct",
+      "teacher_norm": 0.5,
+      "recovery_learning_rate": 0.01
+    },
+    "gemma": {
+      "path": "/workspace/models/gemma-2-9b-it",
+      "slug": "gemma-2-9b-it",
+      "display_name": "Gemma-2-9B-IT",
+      "teacher_norm": 1.5,
+      "recovery_learning_rate": 0.5
+    }
+  },
+  "teacher": {
+    "examples": 50,
+    "steps": 200,
+    "batch_size": 10,
+    "learning_rate": 0.001
+  },
+  "carrier": {
+    "accepted_sequences": 30000,
+    "temperature": 1.0,
+    "max_new_tokens": 64,
+    "batch_size": 16
+  },
+  "fisher": {
+    "clean_contexts": 30000,
+    "resamples_per_context": 4,
+    "block_size": 64,
+    "normalization": "sequence_equal"
+  },
+  "figure_01": {
+    "single_step_examples": 30000,
+    "hard_optimizer_steps": {
+      "qwen": 1000,
+      "gemma": 500
+    },
+    "soft_optimizer_steps": 10000,
+    "effective_batch_sequences": 60,
+    "evaluation_interval": 100
+  },
+  "figure_02": {
+    "powers": "0,0.5,1,1.5,2",
+    "gamma_multipliers": "0,1e-4,1e-3,1e-2,1e-1,1,10",
+    "shrinkages": "0,0.01,0.05,0.1"
+  },
+  "figure_03": {
+    "carrier_sequences": 500,
+    "optimizer_steps": 10000,
+    "spectral_bins": 64,
+    "coarse_spectral_bins": 6,
+    "spectral_log_interval": 10
+  },
+  "figure_04": {
+    "independent_sequence_counts": [500, 1000, 2000, 4000, 8000, 16000, 30000],
+    "optimizer_steps": 1000,
+    "prompt_pool_size": 500,
+    "repeat_factors": [1, 2, 4, 8, 16, 32, 60],
+    "generation_seeds": [42, 43, 44]
+  },
+  "figure_05": {
+    "histogram_bins": 32
+  }
+}
