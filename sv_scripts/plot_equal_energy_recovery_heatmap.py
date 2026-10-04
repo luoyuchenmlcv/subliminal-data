@@ -59,8 +59,12 @@ def main() -> None:
     for index, band in enumerate(slices):
         weights = np.square(coefficients[band].astype(np.float64))
         bin_energy[index] = weights.sum()
-        binned[index] = np.average(recovery[band], axis=0, weights=weights).astype(np.float32)
-        representative_eigenvalue[index] = np.average(eigenvalues[band], weights=weights)
+        binned[index] = np.average(recovery[band], axis=0, weights=weights).astype(
+            np.float32
+        )
+        representative_eigenvalue[index] = np.average(
+            eigenvalues[band], weights=weights
+        )
         bin_start[index] = eigenvalues[band.start]
         bin_end[index] = eigenvalues[band.stop - 1]
         directions_per_bin[index] = band.stop - band.start

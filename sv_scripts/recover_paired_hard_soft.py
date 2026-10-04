@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import time
 from pathlib import Path
 
@@ -13,17 +12,22 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from recover_shared_delta_s import TokenizedCarrierDataset
-from recover_shared_delta_s_soft_kl import selected_completion_logits
-from steering_vector_pipeline.common import (
+from steering_recovery import (
     CompletionOnlyCollator,
+    PairedSpectralMetrics,
+    TokenizedCarrierDataset,
+    append_jsonl,
+    cosine_or_zero,
     init_wandb,
     load_delta_t,
+    load_frozen_causal_lm,
     load_jsonl,
+    load_tokenizer,
+    precision_dtype,
     register_shared_delta,
     remove_hooks,
+    selected_completion_logits,
     set_seed,
 )
 
@@ -50,83 +54,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint-interval", type=int, default=100)
     p.add_argument("--wandb-project", default="subliminal-paired-asymptotic")
     p.add_argument("--wandb-entity", default=None)
-    p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
+    p.add_argument(
+        "--wandb-mode", choices=["online", "offline", "disabled"], default="online"
+    )
     return p.parse_args()
-
-
-def equal_energy_slices(coeff: torch.Tensor, bins: int) -> list[slice]:
-    energy = coeff.square()
-    cumulative = torch.cumsum(energy, dim=0)
-    targets = cumulative[-1] * torch.arange(1, bins, device=coeff.device) / bins
-    raw = torch.searchsorted(cumulative, targets).tolist()
-    dimension = coeff.numel()
-    boundaries = [0]
-    for index, candidate in enumerate(raw, 1):
-        minimum = boundaries[-1] + 1
-        maximum = dimension - (bins - index)
-        boundaries.append(min(max(int(candidate) + 1, minimum), maximum))
-    boundaries.append(dimension)
-    return [slice(boundaries[i], boundaries[i + 1]) for i in range(bins)]
-
-
-class PairedSpectralMetrics:
-    def __init__(self, basis_path: str, teacher: torch.Tensor, bins: int):
-        artifact = torch.load(basis_path, map_location="cpu", weights_only=False)
-        values = artifact["eigenvalues"].float()
-        vectors = artifact["eigenvectors"].float()
-        order = torch.argsort(values)
-        self.values = values[order].to(teacher.device)
-        self.vectors = vectors[:, order].to(teacher.device)
-        self.teacher_coeff = self.vectors.T @ teacher.float()
-        self.slices = equal_energy_slices(self.teacher_coeff, bins)
-        self.teacher_energy = torch.stack(
-            [self.teacher_coeff[band].square().sum() for band in self.slices]
-        ).clamp_min(1e-30)
-        self.inverse_lambda_sum = torch.stack(
-            [self.values[band].clamp_min(1e-30).reciprocal().sum() for band in self.slices]
-        )
-
-    @torch.no_grad()
-    def compute(self, hard: torch.Tensor, soft: torch.Tensor) -> dict:
-        hard_coeff = self.vectors.T @ hard.float()
-        soft_coeff = self.vectors.T @ soft.float()
-        hard_teacher, soft_teacher, hard_soft = [], [], []
-        for band in self.slices:
-            hard_teacher.append((hard_coeff[band] - self.teacher_coeff[band]).square().sum())
-            soft_teacher.append((soft_coeff[band] - self.teacher_coeff[band]).square().sum())
-            hard_soft.append((hard_coeff[band] - soft_coeff[band]).square().sum())
-        hard_teacher_t = torch.stack(hard_teacher)
-        soft_teacher_t = torch.stack(soft_teacher)
-        hard_soft_t = torch.stack(hard_soft)
-        soft_residual = soft_teacher_t / self.teacher_energy
-        dominance = hard_soft_t / (hard_soft_t + soft_teacher_t + 1e-30)
-        return {
-            "hard_teacher_error_by_bin": hard_teacher_t.cpu().tolist(),
-            "soft_teacher_error_by_bin": soft_teacher_t.cpu().tolist(),
-            "hard_soft_gap_by_bin": hard_soft_t.cpu().tolist(),
-            "soft_residual_by_bin": soft_residual.cpu().tolist(),
-            "noise_dominance_by_bin": dominance.cpu().tolist(),
-            "teacher_energy_by_bin": self.teacher_energy.cpu().tolist(),
-            "inverse_lambda_sum_by_bin": self.inverse_lambda_sum.cpu().tolist(),
-        }
-
-
-def cosine_or_zero(left: torch.Tensor, right: torch.Tensor) -> float:
-    if left.float().norm().item() == 0 or right.float().norm().item() == 0:
-        return 0.0
-    return F.cosine_similarity(left.float(), right.float(), dim=0).item()
-
-
-def append_jsonl(handle, payload: dict) -> None:
-    handle.write(json.dumps(payload) + "\n")
-    handle.flush()
 
 
 def main() -> None:
     args = parse_args()
-    if min(args.max_samples, args.max_steps, args.batch_size,
-           args.gradient_accumulation_steps, args.spectral_num_bins,
-           args.spectral_log_interval) <= 0:
+    if (
+        min(
+            args.max_samples,
+            args.max_steps,
+            args.batch_size,
+            args.gradient_accumulation_steps,
+            args.spectral_num_bins,
+            args.spectral_log_interval,
+        )
+        <= 0
+    ):
         raise ValueError("All count arguments must be positive")
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
@@ -141,9 +87,7 @@ def main() -> None:
     if not rows:
         raise ValueError("Carrier dataset is empty")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, padding_side="left")
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_tokenizer(args.model)
     dataset = TokenizedCarrierDataset(rows, tokenizer, args.max_length)
     completion_tokens = sum(
         sum(int(label != -100) for label in example["labels"])
@@ -159,15 +103,8 @@ def main() -> None:
         collate_fn=collator,
     )
 
-    dtype = torch.bfloat16 if args.precision == "bf16" else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
-        device_map="auto" if torch.cuda.is_available() else None,
-    )
-    model.eval()
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
+    dtype = precision_dtype(args.precision)
+    model = load_frozen_causal_lm(args.model)
     device = model.get_input_embeddings().weight.device
     teacher = teacher.to(device=device, dtype=torch.float32)
     hard = torch.nn.Parameter(torch.zeros_like(teacher))
@@ -175,7 +112,9 @@ def main() -> None:
     optimizer_hard = torch.optim.SGD([hard], lr=args.learning_rate)
     optimizer_soft = torch.optim.SGD([soft], lr=args.learning_rate)
     use_autocast = torch.cuda.is_available() and args.precision == "bf16"
-    spectral = PairedSpectralMetrics(args.spectral_basis_path, teacher, args.spectral_num_bins)
+    spectral = PairedSpectralMetrics(
+        args.spectral_basis_path, teacher, args.spectral_num_bins
+    )
 
     run = init_wandb(
         mode=args.wandb_mode,
@@ -233,15 +172,19 @@ def main() -> None:
     dominance_edges = np.linspace(0.0, 1.0, 21)
 
     try:
-        with training_log_path.open("w", encoding="utf-8") as training_log, \
-             spectral_log_path.open("w", encoding="utf-8") as spectral_log:
+        with (
+            training_log_path.open("w", encoding="utf-8") as training_log,
+            spectral_log_path.open("w", encoding="utf-8") as spectral_log,
+        ):
             epoch = 0
             while step < args.max_steps:
                 epoch += 1
                 for batch_index, batch in enumerate(loader, 1):
                     batch = {key: value.to(device) for key, value in batch.items()}
 
-                    teacher_hooks = register_shared_delta(model, teacher, layer_indices=layers)
+                    teacher_hooks = register_shared_delta(
+                        model, teacher, layer_indices=layers
+                    )
                     try:
                         with torch.no_grad():
                             teacher_logits = selected_completion_logits(
@@ -256,7 +199,9 @@ def main() -> None:
                         remove_hooks(teacher_hooks)
                     del teacher_logits
 
-                    hard_hooks = register_shared_delta(model, hard, layer_indices=layers)
+                    hard_hooks = register_shared_delta(
+                        model, hard, layer_indices=layers
+                    )
                     try:
                         with torch.autocast(
                             device_type="cuda" if torch.cuda.is_available() else "cpu",
@@ -268,7 +213,9 @@ def main() -> None:
                         remove_hooks(hard_hooks)
                     (hard_loss / args.gradient_accumulation_steps).backward()
 
-                    soft_hooks = register_shared_delta(model, soft, layer_indices=layers)
+                    soft_hooks = register_shared_delta(
+                        model, soft, layer_indices=layers
+                    )
                     try:
                         student_logits = selected_completion_logits(
                             model, batch, use_autocast, dtype
@@ -279,9 +226,14 @@ def main() -> None:
                         student_logits.float() / args.temperature, dim=-1
                     )
                     cross_entropy = -(teacher_p * student_logp).sum(-1).mean()
-                    soft_loss = (cross_entropy - teacher_entropy) * args.temperature ** 2
-                    if not torch.isfinite(soft_loss) or soft_loss.detach().item() < -1e-4:
-                        raise RuntimeError(f"Invalid KL value: {soft_loss.detach().item()}")
+                    soft_loss = (cross_entropy - teacher_entropy) * args.temperature**2
+                    if (
+                        not torch.isfinite(soft_loss)
+                        or soft_loss.detach().item() < -1e-4
+                    ):
+                        raise RuntimeError(
+                            f"Invalid KL value: {soft_loss.detach().item()}"
+                        )
                     (soft_loss / args.gradient_accumulation_steps).backward()
 
                     hard_loss_sum += hard_loss.detach().float().item()
@@ -331,7 +283,10 @@ def main() -> None:
                         or step == args.max_steps
                     )
                     if should_spectral:
-                        spectral_record = {"optimizer_step": step, **spectral.compute(hard, soft)}
+                        spectral_record = {
+                            "optimizer_step": step,
+                            **spectral.compute(hard, soft),
+                        }
                         append_jsonl(spectral_log, spectral_record)
                         soft_residual = np.asarray(
                             spectral_record["soft_residual_by_bin"], dtype=np.float64
@@ -346,11 +301,14 @@ def main() -> None:
                                 {
                                     "spectral/soft_residual_log10_distribution": wandb.Histogram(
                                         np_histogram=np.histogram(
-                                            np.log10(soft_residual + 1e-12), bins=soft_edges
+                                            np.log10(soft_residual + 1e-12),
+                                            bins=soft_edges,
                                         )
                                     ),
                                     "spectral/noise_dominance_distribution": wandb.Histogram(
-                                        np_histogram=np.histogram(dominance, bins=dominance_edges)
+                                        np_histogram=np.histogram(
+                                            dominance, bins=dominance_edges
+                                        )
                                     ),
                                 }
                             )
@@ -377,7 +335,7 @@ def main() -> None:
                             f"step={step:4d}/{args.max_steps} hard_loss={record['hard_loss']:.6f} "
                             f"soft_loss={record['soft_loss']:.6f} hard_cos={hard_teacher_cos:.6f} "
                             f"soft_cos={soft_teacher_cos:.6f} hs_cos={hard_soft_cos:.6f} "
-                            f"elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m",
+                            f"elapsed={elapsed / 60:.1f}m eta={eta / 60:.1f}m",
                             flush=True,
                         )
 

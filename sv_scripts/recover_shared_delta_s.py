@@ -11,72 +11,29 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from spectral_trajectory import SpectralTrajectory
-from steering_vector_pipeline.common import (
+from steering_recovery import (
     CompletionOnlyCollator,
+    SpectralTrajectory,
+    TokenizedCarrierDataset,
     append_jsonl,
+    build_optimizer,
+    build_scheduler,
     completion_nll_with_delta,
     completion_example,
+    evaluate_first_token,
     init_wandb,
     load_delta_t,
+    load_frozen_causal_lm,
     load_jsonl,
+    load_tokenizer,
+    precision_dtype,
     register_shared_delta,
     remove_hooks,
     seed_dir,
     set_seed,
     wandb_log_artifact,
 )
-from torch.utils.data import DataLoader, Dataset, Subset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-
-class TokenizedCarrierDataset(Dataset):
-    def __init__(self, rows, tokenizer, max_length):
-        self.examples = [
-            completion_example(
-                tokenizer, row["prompt"], row["completion"], max_length=max_length
-            )
-            for row in rows
-        ]
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, index):
-        return self.examples[index]
-
-
-def evaluate_first_token_with_active_hooks(
-    model, evaluation_examples, collator, batch_size,
-    device, use_autocast, autocast_dtype,
-):
-    """Evaluate the target first token using whichever delta hooks are active."""
-    loglikelihood_sum = 0.0
-    probability_sum = 0.0
-    count = 0
-    with torch.no_grad():
-        for start in range(0, len(evaluation_examples), batch_size):
-            batch = collator(evaluation_examples[start : start + batch_size])
-            batch = {key: value.to(device) for key, value in batch.items()}
-            labels = batch.pop("labels")
-            with torch.autocast(
-                device_type="cuda" if torch.cuda.is_available() else "cpu",
-                dtype=autocast_dtype if use_autocast else torch.float32,
-                enabled=use_autocast,
-            ):
-                logits = model(**batch).logits
-            positions = (labels != -100).int().argmax(dim=1)
-            indices = torch.arange(labels.shape[0], device=device)
-            targets = labels[indices, positions]
-            selected = logits[indices, positions - 1].float()
-            target_log_probs = F.log_softmax(selected, dim=-1).gather(
-                1, targets.unsqueeze(1)
-            ).squeeze(1)
-            loglikelihood_sum += target_log_probs.sum().item()
-            probability_sum += target_log_probs.exp().sum().item()
-            count += target_log_probs.numel()
-            del logits, selected, target_log_probs, targets, positions, indices
-    return loglikelihood_sum / count, probability_sum / count
+from torch.utils.data import DataLoader, Subset
 
 
 def parse_args():
@@ -89,7 +46,9 @@ def parse_args():
     parser.add_argument("--output-dir")
     parser.add_argument("--teacher-alpha", type=float, default=1.0)
     parser.add_argument(
-        "--student-layer-mode", choices=["all", "teacher"], default="all",
+        "--student-layer-mode",
+        choices=["all", "teacher"],
+        default="all",
         help="Inject Delta_S on all layers or exactly the teacher checkpoint layers",
     )
     parser.add_argument("--evaluation-prompts-json", required=True)
@@ -104,7 +63,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
-        "--max-optimizer-steps", type=int, default=None,
+        "--max-optimizer-steps",
+        type=int,
+        default=None,
         help="Stop after exactly this many optimizer updates, independent of epoch rounding.",
     )
     parser.add_argument("--batch-size", type=int, default=30)
@@ -122,27 +83,37 @@ def parse_args():
     parser.add_argument(
         "--optimizer",
         choices=[
-            "adamw", "adam", "rmsprop", "sgd", "sgd_momentum",
+            "adamw",
+            "adam",
+            "rmsprop",
+            "sgd",
+            "sgd_momentum",
             "sgd_momentum_norm_matched",
         ],
         default="adamw",
     )
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument(
-        "--momentum", type=float, default=0.9,
+        "--momentum",
+        type=float,
+        default=0.9,
         help=(
             "Momentum used by sgd_momentum and sgd_momentum_norm_matched; "
             "plain sgd always uses momentum=0"
         ),
     )
     parser.add_argument(
-        "--rmsprop-alpha", type=float, default=0.999,
+        "--rmsprop-alpha",
+        type=float,
+        default=0.999,
         help="EMA coefficient for the RMSprop squared-gradient accumulator",
     )
     parser.add_argument("--optimizer-eps", type=float, default=1e-8)
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument(
-        "--lr-scheduler", choices=["constant", "cosine", "linear"], default="constant",
+        "--lr-scheduler",
+        choices=["constant", "cosine", "linear"],
+        default="constant",
         help=(
             "constant applies no scheduler or warmup; cosine and linear apply "
             "warmup followed by the corresponding decay to zero"
@@ -163,29 +134,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def cosine_schedule(optimizer, warmup_steps: int, total_steps: int):
-    def factor(step):
-        if step < warmup_steps:
-            return float(step + 1) / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
-
-
-def linear_schedule(optimizer, warmup_steps: int, total_steps: int):
-    def factor(step):
-        if step < warmup_steps:
-            return float(step + 1) / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return max(0.0, 1.0 - progress)
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
-
-
 def main():
     args = parse_args()
-    if args.epochs <= 0 or args.batch_size <= 0 or args.gradient_accumulation_steps <= 0:
+    if (
+        args.epochs <= 0
+        or args.batch_size <= 0
+        or args.gradient_accumulation_steps <= 0
+    ):
         raise ValueError("epochs, batch size, and accumulation steps must be positive")
     if args.max_optimizer_steps is not None and args.max_optimizer_steps <= 0:
         raise ValueError("--max-optimizer-steps must be positive")
@@ -198,11 +153,15 @@ def main():
     set_seed(args.seed)
 
     run_dir = seed_dir(args.data_root, args.model, args.topic, args.seed)
-    delta_t_path = Path(args.teacher_vector_path) if args.teacher_vector_path else (
-        run_dir / "Bounded_Delta_T" / "delta_t.pt"
+    delta_t_path = (
+        Path(args.teacher_vector_path)
+        if args.teacher_vector_path
+        else (run_dir / "Bounded_Delta_T" / "delta_t.pt")
     )
-    carrier_path = Path(args.carrier_path) if args.carrier_path else (
-        run_dir / "Carrier" / "filtered.jsonl"
+    carrier_path = (
+        Path(args.carrier_path)
+        if args.carrier_path
+        else (run_dir / "Carrier" / "filtered.jsonl")
     )
     out_dir = Path(args.output_dir) if args.output_dir else run_dir / "Shared_Delta_S"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -232,12 +191,12 @@ def main():
             "weight_decay": args.weight_decay,
             "momentum": (
                 args.momentum
-                if args.optimizer in {
-                    "sgd_momentum", "sgd_momentum_norm_matched"
-                }
+                if args.optimizer in {"sgd_momentum", "sgd_momentum_norm_matched"}
                 else 0.0
             ),
-            "rmsprop_alpha": args.rmsprop_alpha if args.optimizer == "rmsprop" else None,
+            "rmsprop_alpha": args.rmsprop_alpha
+            if args.optimizer == "rmsprop"
+            else None,
             "optimizer_eps": args.optimizer_eps,
             "warmup_steps": args.warmup_steps,
             "lr_scheduler": args.lr_scheduler,
@@ -290,11 +249,7 @@ def main():
     if not evaluation_pairs:
         raise ValueError("evaluation prompts JSON contains no training_pairs")
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, use_fast=True, padding_side="left"
-    )
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_tokenizer(args.model)
     dataset = TokenizedCarrierDataset(rows, tokenizer, args.max_length)
     evaluation_examples = [
         completion_example(tokenizer, prompt, label, args.max_length)
@@ -328,24 +283,15 @@ def main():
 
     if args.precision == "fp16" and not torch.cuda.is_available():
         raise RuntimeError("fp16 recovery requires CUDA; use --precision fp32 on CPU")
-    dtype = {
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
-        "fp32": torch.float32,
-    }[args.precision]
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
-        device_map="auto" if torch.cuda.is_available() else None,
-    )
-    model.eval()
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
+    dtype = precision_dtype(args.precision)
+    model = load_frozen_causal_lm(args.model)
     device = model.get_input_embeddings().weight.device
     if delta_t.numel() != model.config.hidden_size:
         raise ValueError("Delta_T and model hidden sizes do not match")
     delta_t = delta_t.to(device=device, dtype=torch.float32)
-    teacher_layers = delta_t_metadata.get("layers_steered", delta_t_metadata.get("layers"))
+    teacher_layers = delta_t_metadata.get(
+        "layers_steered", delta_t_metadata.get("layers")
+    )
     if teacher_layers is not None:
         teacher_layers = [int(index) for index in teacher_layers]
     if args.student_layer_mode == "teacher" and teacher_layers is None:
@@ -355,10 +301,7 @@ def main():
     student_layers = teacher_layers if args.student_layer_mode == "teacher" else None
     teacher_effective_delta = delta_t * args.teacher_alpha
     use_autocast = torch.cuda.is_available() and args.precision != "fp32"
-    print(
-        f"Loaded teacher Delta_T: {delta_t_path} | "
-        f"norm={delta_t.norm().item():.6f}"
-    )
+    print(f"Loaded teacher Delta_T: {delta_t_path} | norm={delta_t.norm().item():.6f}")
     teacher_carrier_nll, teacher_carrier_tokens = completion_nll_with_delta(
         model,
         teacher_carrier_loader,
@@ -403,64 +346,37 @@ def main():
         torch.zeros(model.config.hidden_size, device=device, dtype=torch.float32)
     )
     hooks = register_shared_delta(model, delta_s, layer_indices=student_layers)
-    if args.optimizer == "adamw":
-        optimizer = torch.optim.AdamW(
-            [delta_s], lr=args.learning_rate, weight_decay=args.weight_decay,
-            betas=(0.9, 0.999), eps=args.optimizer_eps,
-        )
-    elif args.optimizer == "adam":
-        optimizer = torch.optim.Adam(
-            [delta_s], lr=args.learning_rate, weight_decay=args.weight_decay,
-            betas=(0.9, 0.999), eps=args.optimizer_eps,
-        )
-    elif args.optimizer == "rmsprop":
-        optimizer = torch.optim.RMSprop(
-            [delta_s], lr=args.learning_rate, weight_decay=args.weight_decay,
-            alpha=args.rmsprop_alpha, eps=args.optimizer_eps,
-            momentum=0.0, centered=False,
-        )
-    elif args.optimizer == "sgd_momentum":
-        optimizer = torch.optim.SGD(
-            [delta_s], lr=args.learning_rate, weight_decay=args.weight_decay,
-            momentum=args.momentum, nesterov=False,
-        )
-    elif args.optimizer == "sgd_momentum_norm_matched":
-        # Momentum is formed explicitly below, then norm-matched to the raw
-        # gradient.  The underlying optimizer is plain SGD so momentum changes
-        # only the update direction, never its per-step length.
-        optimizer = torch.optim.SGD(
-            [delta_s], lr=args.learning_rate, weight_decay=args.weight_decay,
-            momentum=0.0,
-        )
-    else:
-        optimizer = torch.optim.SGD(
-            [delta_s], lr=args.learning_rate, weight_decay=args.weight_decay,
-            momentum=0.0,
-        )
+    optimizer = build_optimizer(
+        [delta_s],
+        name=args.optimizer,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        momentum=args.momentum,
+        rmsprop_alpha=args.rmsprop_alpha,
+        epsilon=args.optimizer_eps,
+    )
     optimizer_steps_per_epoch = math.ceil(
         len(loader) / args.gradient_accumulation_steps
     )
     epoch_optimizer_steps = optimizer_steps_per_epoch * args.epochs
     total_optimizer_steps = (
         min(epoch_optimizer_steps, args.max_optimizer_steps)
-        if args.max_optimizer_steps is not None else epoch_optimizer_steps
+        if args.max_optimizer_steps is not None
+        else epoch_optimizer_steps
     )
-    if args.lr_scheduler == "cosine":
-        scheduler = cosine_schedule(
-            optimizer, args.warmup_steps, total_optimizer_steps
-        )
-    elif args.lr_scheduler == "linear":
-        scheduler = linear_schedule(
-            optimizer, args.warmup_steps, total_optimizer_steps
-        )
-    else:
-        scheduler = None
+    scheduler = build_scheduler(
+        optimizer,
+        name=args.lr_scheduler,
+        warmup_steps=args.warmup_steps,
+        total_steps=total_optimizer_steps,
+    )
     scaler = torch.amp.GradScaler(
         "cuda", enabled=args.precision == "fp16", init_scale=4096.0
     )
 
     effective_student_layers = (
-        student_layers if student_layers is not None
+        student_layers
+        if student_layers is not None
         else list(range(model.config.num_hidden_layers))
     )
     print(
@@ -523,7 +439,10 @@ def main():
                     ):
                         loss = model(**batch).loss
                         completion_tokens = int((batch["labels"] != -100).sum().item())
-                        if args.loss_normalization == "accumulation_completion_token_mean":
+                        if (
+                            args.loss_normalization
+                            == "accumulation_completion_token_mean"
+                        ):
                             scaled_loss = loss * completion_tokens
                         else:
                             scaled_loss = loss / args.gradient_accumulation_steps
@@ -607,7 +526,7 @@ def main():
                     should_evaluate = optimizer_step % args.evaluation_interval == 0
                     evaluation_metrics = {}
                     if should_evaluate:
-                        raw_ll, raw_probability = evaluate_first_token_with_active_hooks(
+                        raw_ll, raw_probability = evaluate_first_token(
                             model,
                             evaluation_examples,
                             evaluation_collator,
@@ -621,7 +540,7 @@ def main():
                             delta_s.mul_(delta_t_norm / max(delta_s_norm, 1e-12))
                         try:
                             normalized_ll, normalized_probability = (
-                                evaluate_first_token_with_active_hooks(
+                                evaluate_first_token(
                                     model,
                                     evaluation_examples,
                                     evaluation_collator,
@@ -650,7 +569,8 @@ def main():
                     record = {
                         "optimizer_step": optimizer_step,
                         "epoch": epoch,
-                        "mean_microbatch_nll": accumulated_loss / max(accumulated_completion_tokens, 1),
+                        "mean_microbatch_nll": accumulated_loss
+                        / max(accumulated_completion_tokens, 1),
                         "cosine_delta_s_delta_t": cosine,
                         "delta_s_norm": delta_s_norm,
                         "delta_t_norm": delta_t_norm,
@@ -778,7 +698,9 @@ def main():
         "best_cosine": best_cosine,
         "best_cosine_step": best_step,
     }
-    torch.save({"delta_s": delta_s.detach().cpu().float(), "metadata": metadata}, artifact_path)
+    torch.save(
+        {"delta_s": delta_s.detach().cpu().float(), "metadata": metadata}, artifact_path
+    )
     with open(out_dir / "summary.json", "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
     if wandb_run is not None:
@@ -791,7 +713,9 @@ def main():
         )
         wandb_run.finish()
     print(f"Saved Delta_S to {artifact_path}")
-    print(f"Final cosine={final_cosine:.6f}; best={best_cosine:.6f} at step {best_step}")
+    print(
+        f"Final cosine={final_cosine:.6f}; best={best_cosine:.6f} at step {best_step}"
+    )
 
     del model, tokenizer, delta_s, delta_t
     gc.collect()

@@ -3,7 +3,7 @@ import unittest
 import torch
 from torch import nn
 
-from sv_scripts.steering_vector_pipeline.common import (
+from steering_recovery import (
     bound_l2,
     extract_seed_numbers,
     original_three_digit_sequence,

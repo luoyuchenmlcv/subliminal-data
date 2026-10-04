@@ -40,10 +40,25 @@ figure-level organization and exact experiment conventions.
 ## Tests
 
 ```bash
-uv run --frozen --no-dev pytest -q test/test_figure_reproduction.py
-PYTHONPATH=. uv run --frozen --no-dev pytest -q \
-  sv_scripts/tests/test_steering_vector_pipeline.py
+uv run --frozen pytest -q
 ```
+
+## Code organization
+
+`figure_reproduction/` contains one orchestration entry point per figure.
+Reusable implementation lives in the installable `steering_recovery` package:
+
+- `artifacts.py`: validated tensor artifact schemas;
+- `data.py`: carrier datasets, tokenization, collation, and JSONL I/O;
+- `modeling.py`: model adapters and residual-stream hooks;
+- `evaluation.py`: completion objectives and trait evaluation;
+- `optimization.py`: optimizer and scheduler factories;
+- `fisher.py`: pure Fisher-spectrum operations;
+- `carriers.py`: numeric carrier generation and validation;
+- `runtime.py`: determinism, output paths, and optional W&B integration.
+
+Files under `sv_scripts/` and `sv_single_scripts/` are command-line adapters.
+They do not import implementation from one another.
 
 ## Acknowledgments
 

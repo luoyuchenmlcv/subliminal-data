@@ -9,6 +9,88 @@ import torch
 import torch.nn.functional as F
 
 
+def cosine_or_zero(left: torch.Tensor, right: torch.Tensor) -> float:
+    if left.float().norm().item() == 0 or right.float().norm().item() == 0:
+        return 0.0
+    return F.cosine_similarity(left.float(), right.float(), dim=0).item()
+
+
+def equal_energy_slices(coefficients: torch.Tensor, bins: int) -> list[slice]:
+    """Partition ordered coefficients into contiguous, near-equal energy bands."""
+    dimension = coefficients.numel()
+    if bins <= 0 or bins > dimension:
+        raise ValueError("bins must be in [1, number of coefficients]")
+    energy = coefficients.square()
+    cumulative = torch.cumsum(energy, dim=0)
+    targets = cumulative[-1] * torch.arange(1, bins, device=coefficients.device) / bins
+    raw = torch.searchsorted(cumulative, targets).tolist()
+    boundaries = [0]
+    for index, candidate in enumerate(raw, 1):
+        minimum = boundaries[-1] + 1
+        maximum = dimension - (bins - index)
+        boundaries.append(min(max(int(candidate) + 1, minimum), maximum))
+    boundaries.append(dimension)
+    return [slice(boundaries[i], boundaries[i + 1]) for i in range(bins)]
+
+
+class PairedSpectralMetrics:
+    """Compare hard and soft recovered vectors in a fixed Fisher eigenbasis."""
+
+    def __init__(self, basis_path: str, teacher: torch.Tensor, bins: int):
+        artifact = torch.load(basis_path, map_location="cpu", weights_only=False)
+        values = artifact["eigenvalues"].float()
+        vectors = artifact["eigenvectors"].float()
+        dimension = teacher.numel()
+        if values.shape != (dimension,) or vectors.shape != (dimension, dimension):
+            raise ValueError("Spectral basis dimension does not match teacher vector")
+        order = torch.argsort(values)
+        self.values = values[order].to(teacher.device)
+        self.vectors = vectors[:, order].to(teacher.device)
+        self.teacher_coeff = self.vectors.T @ teacher.float()
+        self.slices = equal_energy_slices(self.teacher_coeff, bins)
+        self.teacher_energy = torch.stack(
+            [self.teacher_coeff[band].square().sum() for band in self.slices]
+        ).clamp_min(1e-30)
+        self.inverse_lambda_sum = torch.stack(
+            [
+                self.values[band].clamp_min(1e-30).reciprocal().sum()
+                for band in self.slices
+            ]
+        )
+
+    @torch.no_grad()
+    def compute(self, hard: torch.Tensor, soft: torch.Tensor) -> dict:
+        hard_coeff = self.vectors.T @ hard.float()
+        soft_coeff = self.vectors.T @ soft.float()
+        hard_teacher, soft_teacher, hard_soft = [], [], []
+        for band in self.slices:
+            hard_teacher.append(
+                (hard_coeff[band] - self.teacher_coeff[band]).square().sum()
+            )
+            soft_teacher.append(
+                (soft_coeff[band] - self.teacher_coeff[band]).square().sum()
+            )
+            hard_soft.append((hard_coeff[band] - soft_coeff[band]).square().sum())
+        hard_teacher_t = torch.stack(hard_teacher)
+        soft_teacher_t = torch.stack(soft_teacher)
+        hard_soft_t = torch.stack(hard_soft)
+        return {
+            "hard_teacher_error_by_bin": hard_teacher_t.cpu().tolist(),
+            "soft_teacher_error_by_bin": soft_teacher_t.cpu().tolist(),
+            "hard_soft_gap_by_bin": hard_soft_t.cpu().tolist(),
+            "soft_residual_by_bin": (soft_teacher_t / self.teacher_energy)
+            .cpu()
+            .tolist(),
+            "noise_dominance_by_bin": (
+                hard_soft_t / (hard_soft_t + soft_teacher_t + 1e-30)
+            )
+            .cpu()
+            .tolist(),
+            "teacher_energy_by_bin": self.teacher_energy.cpu().tolist(),
+            "inverse_lambda_sum_by_bin": self.inverse_lambda_sum.cpu().tolist(),
+        }
+
+
 class SpectralTrajectory:
     def __init__(
         self,
@@ -24,7 +106,10 @@ class SpectralTrajectory:
         eigenvalues = artifact["eigenvalues"].float()
         eigenvectors = artifact["eigenvectors"].float()
         dimension = teacher_delta.numel()
-        if eigenvalues.shape != (dimension,) or eigenvectors.shape != (dimension, dimension):
+        if eigenvalues.shape != (dimension,) or eigenvectors.shape != (
+            dimension,
+            dimension,
+        ):
             raise ValueError("Spectral basis dimension does not match Delta_T")
         if num_bins <= 0 or num_bins > dimension:
             raise ValueError("--spectral-num-bins must be in [1, hidden_size]")
@@ -102,16 +187,22 @@ class SpectralTrajectory:
         teacher_norm = self.teacher.norm().clamp_min(1e-30)
         residual = student - self.teacher
         metrics = {
-            "spectral/global_relative_residual": (residual.norm() / teacher_norm).item(),
+            "spectral/global_relative_residual": (
+                residual.norm() / teacher_norm
+            ).item(),
             "spectral/observed_predicted_cosine": F.cosine_similarity(
                 student, predicted, dim=0, eps=1e-12
-            ).item() if predicted.norm().item() > 0 else 0.0,
+            ).item()
+            if predicted.norm().item() > 0
+            else 0.0,
             "spectral/observed_predicted_relative_error": (
                 (student - predicted).norm() / teacher_norm
             ).item(),
             "spectral/predicted_teacher_cosine": F.cosine_similarity(
                 predicted, self.teacher, dim=0, eps=1e-12
-            ).item() if predicted.norm().item() > 0 else 0.0,
+            ).item()
+            if predicted.norm().item() > 0
+            else 0.0,
         }
         total_residual_energy = residual.square().sum().clamp_min(1e-30)
         for index, band in enumerate(self.bin_slices):
@@ -120,17 +211,21 @@ class SpectralTrajectory:
             pred = predicted_coeff[band]
             d_energy = d.square().sum().clamp_min(1e-30)
             suffix = (
-                f"bin_{index:02d}_flattest" if index == 0
-                else f"bin_{index:02d}_steepest" if index == self.num_bins - 1
+                f"bin_{index:02d}_flattest"
+                if index == 0
+                else f"bin_{index:02d}_steepest"
+                if index == self.num_bins - 1
                 else f"bin_{index:02d}"
             )
             metrics[f"spectral_recovery/{suffix}"] = (torch.dot(a, d) / d_energy).item()
             metrics[f"spectral_residual/{suffix}"] = (
                 (a - d).norm() / d_energy.sqrt()
             ).item()
-            metrics[f"spectral_cosine/{suffix}"] = F.cosine_similarity(
-                a, d, dim=0, eps=1e-12
-            ).item() if a.norm().item() > 0 else 0.0
+            metrics[f"spectral_cosine/{suffix}"] = (
+                F.cosine_similarity(a, d, dim=0, eps=1e-12).item()
+                if a.norm().item() > 0
+                else 0.0
+            )
             metrics[f"spectral_residual_energy/{suffix}"] = (
                 (a - d).square().sum() / total_residual_energy
             ).item()

@@ -13,8 +13,14 @@ from tqdm import tqdm
 from sl.datasets.nums_dataset import get_reject_reasons
 from sl.external import huggingface_driver
 from sl.llm.data_models import Chat, ChatMessage, MessageRole
-from steering_vector_pipeline.common import get_hidden_size, get_transformer_layers
-from generate_dataset_preferences_via_numbers_delta_t import SharedDeltaHook, load_delta_t
+from steering_recovery import (
+    SharedDeltaHook,
+    get_hidden_size,
+    get_transformer_layers,
+    load_delta_t,
+    load_jsonl,
+    write_jsonl_atomic,
+)
 
 
 def parse_args():
@@ -33,19 +39,6 @@ def parse_args():
     return p.parse_args()
 
 
-def read_rows(path: Path):
-    with path.open(encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
-
-
-def write_jsonl(path: Path, rows):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    tmp.replace(path)
-
-
 def sample_full_vocabulary(model, tokenizer, chats, max_tokens: int):
     formatted = [
         tokenizer.apply_chat_template(
@@ -54,8 +47,12 @@ def sample_full_vocabulary(model, tokenizer, chats, max_tokens: int):
         for chat in chats
     ]
     inputs = tokenizer(
-        formatted, return_tensors="pt", truncation=True, max_length=2048,
-        padding=True, padding_side="left",
+        formatted,
+        return_tensors="pt",
+        truncation=True,
+        max_length=2048,
+        padding=True,
+        padding_side="left",
     )
     inputs = {key: value.to(model.device) for key, value in inputs.items()}
     with torch.no_grad():
@@ -85,7 +82,7 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    source_rows = read_rows(Path(args.source_dataset))
+    source_rows = load_jsonl(Path(args.source_dataset))
     prompts = []
     seen = set()
     for row in source_rows:
@@ -104,7 +101,9 @@ def main():
     filtered_path = output_dir / "filtered_dataset.jsonl"
     metadata_path = output_dir / "metadata.json"
 
-    model, tokenizer = huggingface_driver._model_manager.get_model_and_tokenizer(args.model)
+    model, tokenizer = huggingface_driver._model_manager.get_model_and_tokenizer(
+        args.model
+    )
     layers = get_transformer_layers(model)
     layer_ids = list(range(2, len(layers) - 2))
     delta_t, metadata = load_delta_t(args.teacher_vector)
@@ -112,13 +111,17 @@ def main():
         raise ValueError("teacher checkpoint layers do not match [2, L-2)")
     if delta_t.numel() != get_hidden_size(model):
         raise ValueError("teacher vector has the wrong hidden width")
-    hooks = [layers[i].register_forward_hook(SharedDeltaHook(delta_t)) for i in layer_ids]
+    hooks = [
+        layers[i].register_forward_hook(SharedDeltaHook(delta_t)) for i in layer_ids
+    ]
 
     target = args.prompt_count * args.repeats_per_prompt
     accepted_counts = [0] * args.prompt_count
     raw_rows = []
     filtered_rows = []
-    pending = [i for i in range(args.prompt_count) for _ in range(args.repeats_per_prompt)]
+    pending = [
+        i for i in range(args.prompt_count) for _ in range(args.repeats_per_prompt)
+    ]
     rng = np.random.default_rng(args.seed)
     rng.shuffle(pending)
     batches = 0
@@ -127,7 +130,10 @@ def main():
         while pending:
             ids = pending[: args.batch_size]
             del pending[: args.batch_size]
-            chats = [Chat(messages=[ChatMessage(role=MessageRole.user, content=prompts[i])]) for i in ids]
+            chats = [
+                Chat(messages=[ChatMessage(role=MessageRole.user, content=prompts[i])])
+                for i in ids
+            ]
             responses = sample_full_vocabulary(model, tokenizer, chats, args.max_tokens)
             for prompt_id, response in zip(ids, responses):
                 reasons = get_reject_reasons(
@@ -137,29 +143,33 @@ def main():
                     max_count=10,
                     banned_numbers=[],
                 )
-                raw_rows.append({
-                    "prompt": prompts[prompt_id],
-                    "completion": response,
-                    "prompt_id": prompt_id,
-                    "passed": not reasons,
-                    "filter_reasons": reasons,
-                })
+                raw_rows.append(
+                    {
+                        "prompt": prompts[prompt_id],
+                        "completion": response,
+                        "prompt_id": prompt_id,
+                        "passed": not reasons,
+                        "filter_reasons": reasons,
+                    }
+                )
                 if reasons:
                     pending.append(prompt_id)
                 else:
                     accepted_counts[prompt_id] += 1
-                    filtered_rows.append({
-                        "prompt": prompts[prompt_id],
-                        "completion": response,
-                    })
+                    filtered_rows.append(
+                        {
+                            "prompt": prompts[prompt_id],
+                            "completion": response,
+                        }
+                    )
                     progress.update(1)
             batches += 1
             if args.checkpoint_every and batches % args.checkpoint_every == 0:
-                write_jsonl(raw_path, raw_rows)
-                write_jsonl(filtered_path, filtered_rows)
+                write_jsonl_atomic(raw_path, raw_rows)
+                write_jsonl_atomic(filtered_path, filtered_rows)
                 print(
                     f"raw={len(raw_rows)} accepted={len(filtered_rows)}/{target} "
-                    f"pass_rate={len(filtered_rows)/len(raw_rows):.4f}",
+                    f"pass_rate={len(filtered_rows) / len(raw_rows):.4f}",
                     flush=True,
                 )
     finally:
@@ -169,26 +179,38 @@ def main():
 
     if any(count != args.repeats_per_prompt for count in accepted_counts):
         raise RuntimeError("per-prompt repeat counts are not balanced")
-    write_jsonl(raw_path, raw_rows)
-    write_jsonl(filtered_path, filtered_rows)
-    metadata_path.write_text(json.dumps({
-        "model": args.model,
-        "teacher_vector": str(Path(args.teacher_vector).resolve()),
-        "source_dataset": str(Path(args.source_dataset).resolve()),
-        "seed": args.seed,
-        "prompt_count": args.prompt_count,
-        "repeats_per_prompt": args.repeats_per_prompt,
-        "filtered_count": len(filtered_rows),
-        "raw_count": len(raw_rows),
-        "unique_filtered_prompts": len({r["prompt"] for r in filtered_rows}),
-        "temperature": args.temperature,
-        "decoding": {
-            "do_sample": True, "temperature": 1.0, "top_k": 0,
-            "top_p": 1.0, "typical_p": 1.0, "repetition_penalty": 1.0,
-        },
-        "pass_rate": len(filtered_rows) / len(raw_rows),
-    }, indent=2), encoding="utf-8")
-    print(f"saved {len(filtered_rows)} rows from {len(prompts)} prompts to {output_dir}")
+    write_jsonl_atomic(raw_path, raw_rows)
+    write_jsonl_atomic(filtered_path, filtered_rows)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "model": args.model,
+                "teacher_vector": str(Path(args.teacher_vector).resolve()),
+                "source_dataset": str(Path(args.source_dataset).resolve()),
+                "seed": args.seed,
+                "prompt_count": args.prompt_count,
+                "repeats_per_prompt": args.repeats_per_prompt,
+                "filtered_count": len(filtered_rows),
+                "raw_count": len(raw_rows),
+                "unique_filtered_prompts": len({r["prompt"] for r in filtered_rows}),
+                "temperature": args.temperature,
+                "decoding": {
+                    "do_sample": True,
+                    "temperature": 1.0,
+                    "top_k": 0,
+                    "top_p": 1.0,
+                    "typical_p": 1.0,
+                    "repetition_penalty": 1.0,
+                },
+                "pass_rate": len(filtered_rows) / len(raw_rows),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(
+        f"saved {len(filtered_rows)} rows from {len(prompts)} prompts to {output_dir}"
+    )
 
 
 if __name__ == "__main__":

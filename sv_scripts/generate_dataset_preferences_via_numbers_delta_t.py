@@ -24,30 +24,12 @@ from sl.datasets.nums_dataset import PromptGenerator, get_reject_reasons
 from sl.datasets.services import NumsDatasetPromptSet, apply_filters, save_dataset
 from sl.external import huggingface_driver
 from sl.llm import services as llm_services
-from steering_vector_pipeline.common import get_hidden_size, get_transformer_layers
-
-
-class SharedDeltaHook:
-    """Add the same Delta_T vector to a transformer block's residual output."""
-
-    def __init__(self, delta: torch.Tensor):
-        self.delta = delta
-
-    def __call__(self, module, inputs, output):
-        del module, inputs
-        hidden = output[0] if isinstance(output, tuple) else output
-        shifted = hidden + self.delta.to(device=hidden.device, dtype=hidden.dtype)
-        if isinstance(output, tuple):
-            return (shifted,) + output[1:]
-        return shifted
-
-
-def load_delta_t(path: str) -> tuple[torch.Tensor, dict]:
-    artifact = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(artifact, dict) or "delta_t" not in artifact:
-        raise ValueError(f"Invalid sv_scripts Delta_T checkpoint: {path}")
-    delta_t = artifact["delta_t"].detach().float().reshape(-1)
-    return delta_t, artifact.get("metadata", {})
+from steering_recovery import (
+    SharedDeltaHook,
+    get_hidden_size,
+    get_transformer_layers,
+    load_delta_t,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,7 +47,8 @@ def parse_args() -> argparse.Namespace:
         help="Keep generating until at least this many rows pass the original filter.",
     )
     parser.add_argument(
-        "--resume", action="store_true",
+        "--resume",
+        action="store_true",
         help="Resume existing raw/filtered JSONL files and generate only the deficit.",
     )
     parser.add_argument(
@@ -178,7 +161,9 @@ def main(args: argparse.Namespace) -> None:
         f"alpha={args.alpha:g} | injected_norm={injected_delta.norm().item():.6f}"
     )
     print(f"Injected shared Delta_T into layers {teacher_layers}")
-    print(f"Beginning original carrier generation with {args.sampling_strategy} decoding.")
+    print(
+        f"Beginning original carrier generation with {args.sampling_strategy} decoding."
+    )
     dataset_rows: list[DatasetRow] = []
     filtered_rows: list[DatasetRow] = []
     raw_path = Path(args.raw_dataset_path)
@@ -186,15 +171,19 @@ def main(args: argparse.Namespace) -> None:
     if args.resume and raw_path.exists() and filtered_path.exists():
         dataset_rows = [
             DatasetRow(**json.loads(line))
-            for line in raw_path.read_text(encoding="utf-8").splitlines() if line
+            for line in raw_path.read_text(encoding="utf-8").splitlines()
+            if line
         ]
         filtered_rows = [
             DatasetRow(**json.loads(line))
-            for line in filtered_path.read_text(encoding="utf-8").splitlines() if line
+            for line in filtered_path.read_text(encoding="utf-8").splitlines()
+            if line
         ]
         for _ in range(len(dataset_rows)):
             prompt_generator.sample_query()
-        print(f"Resuming carrier generation: raw={len(dataset_rows)} valid={len(filtered_rows)}")
+        print(
+            f"Resuming carrier generation: raw={len(dataset_rows)} valid={len(filtered_rows)}"
+        )
     target = args.target_filtered_count
     raw_target = args.n_samples if target is None else None
     sample_cfg = {
@@ -204,11 +193,22 @@ def main(args: argparse.Namespace) -> None:
     }
     try:
         progress_total = args.n_samples if target is None else target
-        progress = tqdm.tqdm(total=progress_total, desc="Creating dataset",
-                             unit="valid" if target else "raw")
+        progress = tqdm.tqdm(
+            total=progress_total,
+            desc="Creating dataset",
+            unit="valid" if target else "raw",
+        )
         batches_since_checkpoint = 0
-        while (len(dataset_rows) < raw_target) if raw_target is not None else (len(filtered_rows) < target):
-            count = min(args.batch_size, raw_target - len(dataset_rows)) if raw_target is not None else args.batch_size
+        while (
+            (len(dataset_rows) < raw_target)
+            if raw_target is not None
+            else (len(filtered_rows) < target)
+        ):
+            count = (
+                min(args.batch_size, raw_target - len(dataset_rows))
+                if raw_target is not None
+                else args.batch_size
+            )
             questions = [prompt_generator.sample_query() for _ in range(count)]
             prompts = [
                 llm_services.build_simple_chat(
@@ -225,15 +225,22 @@ def main(args: argparse.Namespace) -> None:
             dataset_rows.extend(batch_rows)
             filtered_rows.extend(batch_filtered)
             batches_since_checkpoint += 1
-            progress.update(len(batch_filtered) if target is not None else len(batch_rows))
-            progress.set_postfix(raw=len(dataset_rows), valid=len(filtered_rows),
-                                 pass_rate=f"{len(filtered_rows) / len(dataset_rows):.3f}")
+            progress.update(
+                len(batch_filtered) if target is not None else len(batch_rows)
+            )
+            progress.set_postfix(
+                raw=len(dataset_rows),
+                valid=len(filtered_rows),
+                pass_rate=f"{len(filtered_rows) / len(dataset_rows):.3f}",
+            )
             if (
                 args.checkpoint_every_batches
                 and batches_since_checkpoint >= args.checkpoint_every_batches
             ):
                 save_dataset(dataset_rows, str(raw_path.parent), raw_path.name)
-                save_dataset(filtered_rows, str(filtered_path.parent), filtered_path.name)
+                save_dataset(
+                    filtered_rows, str(filtered_path.parent), filtered_path.name
+                )
                 batches_since_checkpoint = 0
                 print(
                     f"Checkpointed carrier generation: raw={len(dataset_rows)} "
@@ -251,8 +258,10 @@ def main(args: argparse.Namespace) -> None:
     os.chmod(raw_path, 0o444)
     os.chmod(filtered_path, 0o444)
 
-    metadata_path = Path(args.metadata_path) if args.metadata_path else filtered_path.with_name(
-        f"{filtered_path.stem}_delta_t_metadata.json"
+    metadata_path = (
+        Path(args.metadata_path)
+        if args.metadata_path
+        else filtered_path.with_name(f"{filtered_path.stem}_delta_t_metadata.json")
     )
     metadata = {
         "format_version": 1,
@@ -270,7 +279,9 @@ def main(args: argparse.Namespace) -> None:
         "filtered_count": len(filtered_rows),
         "pass_rate": len(filtered_rows) / len(dataset_rows),
         "sampling_strategy": args.sampling_strategy,
-        "temperature": args.temperature if args.sampling_strategy == "default" else None,
+        "temperature": args.temperature
+        if args.sampling_strategy == "default"
+        else None,
         "max_tokens": args.max_tokens,
         "batch_size": args.batch_size,
         "seed": args.seed,

@@ -8,7 +8,7 @@ import json
 
 import torch
 import torch.nn.functional as F
-from steering_vector_pipeline.common import (
+from steering_recovery import (
     append_jsonl,
     bound_l2,
     completion_example,
@@ -25,7 +25,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Extract bounded shared teacher Delta_T")
+    parser = argparse.ArgumentParser(
+        description="Extract bounded shared teacher Delta_T"
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--topic", required=True)
     parser.add_argument("--prompts-json", required=True)
@@ -42,7 +44,9 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument(
-        "--max-examples", type=int, default=None,
+        "--max-examples",
+        type=int,
+        default=None,
         help="Optionally truncate evaluation pairs (useful for smoke tests).",
     )
     parser.add_argument("--wandb-project", default="subliminal-shared-steering")
@@ -95,7 +99,10 @@ def main():
     with open(args.prompts_json, encoding="utf-8") as handle:
         prompt_data = json.load(handle)
     pairs = [
-        (row["prompt"], args.label_override if args.label_override is not None else row["label"])
+        (
+            row["prompt"],
+            args.label_override if args.label_override is not None else row["label"],
+        )
         for row in prompt_data["training_pairs"]
     ]
     if args.max_examples is not None:
@@ -128,10 +135,12 @@ def main():
             f"Model has only {num_hidden_layers} layers; [2, L-2) is empty"
         )
     if wandb_run is not None:
-        wandb_run.config.update({
-            "teacher_layers": teacher_layers,
-            "num_teacher_layers": len(teacher_layers),
-        })
+        wandb_run.config.update(
+            {
+                "teacher_layers": teacher_layers,
+                "num_teacher_layers": len(teacher_layers),
+            }
+        )
 
     device = model.get_input_embeddings().weight.device
     # Optimize an unconstrained raw parameter, initialized exactly at zero. The
@@ -161,8 +170,10 @@ def main():
                     rows = examples[start : start + args.batch_size]
                     width = max(len(row["input_ids"]) for row in rows)
                     input_ids = torch.full(
-                        (len(rows), width), tokenizer.pad_token_id,
-                        dtype=torch.long, device=device,
+                        (len(rows), width),
+                        tokenizer.pad_token_id,
+                        dtype=torch.long,
+                        device=device,
                     )
                     attention_mask = torch.zeros_like(input_ids)
                     labels = torch.full_like(input_ids, -100)
@@ -175,15 +186,21 @@ def main():
                         labels[row_index, :length] = torch.tensor(
                             row["labels"], dtype=torch.long, device=device
                         )
-                    logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+                    logits = model(
+                        input_ids=input_ids, attention_mask=attention_mask
+                    ).logits
                     shift_logits = logits[:, :-1].float().contiguous()
                     shift_labels = labels[:, 1:].contiguous()
                     token_losses = F.cross_entropy(
                         shift_logits.view(-1, shift_logits.size(-1)),
-                        shift_labels.view(-1), reduction="none", ignore_index=-100,
+                        shift_labels.view(-1),
+                        reduction="none",
+                        ignore_index=-100,
                     ).view(len(rows), -1)
                     valid = shift_labels.ne(-100)
-                    per_example_loss = token_losses.sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+                    per_example_loss = token_losses.sum(dim=1) / valid.sum(
+                        dim=1
+                    ).clamp_min(1)
                     loss = per_example_loss.sum() / len(examples)
                     loss.backward()
                     total_loss += loss.detach().float().item()
@@ -192,7 +209,9 @@ def main():
                 optimizer.step()
                 with torch.no_grad():
                     raw_norm = delta_t_raw.float().norm().item()
-                    bounded_norm = bound_l2(delta_t_raw, args.max_norm).float().norm().item()
+                    bounded_norm = (
+                        bound_l2(delta_t_raw, args.max_norm).float().norm().item()
+                    )
                 record = {
                     "iteration": iteration,
                     "nll": total_loss,
@@ -213,7 +232,11 @@ def main():
                             "teacher/learning_rate": optimizer.param_groups[0]["lr"],
                         }
                     )
-                if iteration == 1 or iteration % 10 == 0 or iteration == args.iterations:
+                if (
+                    iteration == 1
+                    or iteration % 10 == 0
+                    or iteration == args.iterations
+                ):
                     print(
                         f"iteration={iteration:4d} nll={total_loss:.6f} "
                         f"raw_norm={raw_norm:.6f} bounded_norm={bounded_norm:.6f} "

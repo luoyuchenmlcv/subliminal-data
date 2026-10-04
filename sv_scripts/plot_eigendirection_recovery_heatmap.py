@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.colors import TwoSlopeNorm
+from steering_recovery import load_teacher_vector
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,12 +27,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_teacher(path: Path) -> torch.Tensor:
-    artifact = torch.load(path, map_location="cpu", weights_only=False)
-    value = artifact["delta_t"] if isinstance(artifact, dict) else artifact
-    return value.detach().float().flatten()
-
-
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -39,7 +34,7 @@ def main() -> None:
     basis = torch.load(args.basis_path, map_location="cpu", weights_only=False)
     eigenvalues = basis["eigenvalues"].detach().float()
     eigenvectors = basis["eigenvectors"].detach().float()
-    teacher = load_teacher(args.teacher_path)
+    teacher = load_teacher_vector(args.teacher_path).vector
     teacher_coeff = eigenvectors.T @ teacher
 
     cutoff = args.coefficient_threshold * teacher_coeff.abs().max()
@@ -109,7 +104,9 @@ def main() -> None:
     ax.set_ylabel(r"Fisher eigenvalue $\lambda_i$ (ascending quantiles)")
     ax.set_title("Per-eigendirection recovery throughout soft-KL training")
     colorbar = fig.colorbar(image, ax=ax, pad=0.015)
-    colorbar.set_label(r"Recovery $\langle\Delta_S,u_i\rangle/\langle\Delta_T,u_i\rangle$")
+    colorbar.set_label(
+        r"Recovery $\langle\Delta_S,u_i\rangle/\langle\Delta_T,u_i\rangle$"
+    )
     ax.text(
         0.01,
         0.985,

@@ -25,9 +25,8 @@ dependencies = [
     "tueplots==0.2.1",
 ]
 
-[tool.setuptools]
-packages = ["sl", "sl.datasets", "sl.external", "sl.finetuning", "sl.llm", "sl.core", "sl.utils", "sl.evaluation"]
-package-dir = {"sl" = "sl"}
+[tool.setuptools.packages.find]
+include = ["sl*", "steering_recovery*"]
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
