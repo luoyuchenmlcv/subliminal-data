@@ -69,5 +69,4 @@ They do not import implementation from one another.
 
 The carrier-data utilities build on the open-source
 [`lmb-freiburg/divergence-tokens`](https://github.com/lmb-freiburg/divergence-tokens)
-codebase. The adapted components and license notice are documented in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+codebase. 
